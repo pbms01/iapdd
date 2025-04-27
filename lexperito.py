@@ -429,6 +429,8 @@ def carregar_txt(path):
 
 # Função wrapper para carregar diferentes tipos de arquivo
 def carregar_arquivo(path, is_attachment=False):
+    st.warning(f"DEBUG (carregar_arquivo): Função chamada com path='{path}', is_attachment={is_attachment}") # <-- Adicionar log 1
+    
     """
     Carrega um arquivo (TXT, PDF, DOCX).
     Para indexação principal (não anexo), geralmente se espera TXT da pasta OCR.
@@ -442,6 +444,7 @@ def carregar_arquivo(path, is_attachment=False):
 
     ext = os.path.splitext(path)[1].lower()
     nome_base = os.path.basename(path)
+    st.warning(f"DEBUG (carregar_arquivo): Ext extraída='{ext}', nome_base='{nome_base}'") # <-- Adicionar log 2
 
     try:
         if ext == ".txt":
@@ -1348,6 +1351,7 @@ def salvar_feedback(pergunta, resposta, feedback_texto, classificacao, arquivos_
                      continue # Pula para o próximo anexo se não puder salvar
 
                 # Carrega o conteúdo do anexo salvo (TXT, PDF, DOCX)
+                st.warning(f"DEBUG (salvar_feedback): Chamando carregar_arquivo para path='{caminho_arquivo_fb}', Nome original='{file_upload.name}'") # <-- Adicionar log
                 docs_carregados_info = carregar_arquivo(caminho_arquivo_fb, is_attachment=True)
 
                 # Verifica se o carregamento foi válido e tem conteúdo
@@ -2421,6 +2425,7 @@ Siga RIGOROSAMENTE as instruções abaixo para gerar APENAS esta parte da respos
                     "Anexar arquivos para complementar/justificar (Opcional, PDF/DOCX/TXT):",
                     accept_multiple_files=True,
                     key="f_uploader",
+                    type=['pdf', 'docx', 'txt'], 
                     help="Anexe documentos que complementem sua análise, corrijam a resposta ou forneçam contexto adicional. O conteúdo será indexado."
                 )
                 # Botão de envio do formulário
