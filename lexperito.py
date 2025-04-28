@@ -1537,7 +1537,7 @@ def inicializar_chromadb_exemplo(db_instance=None):
 def main():
     st.set_page_config(page_title="Professor de Direito Digital", layout="wide", initial_sidebar_state="expanded")
     st.title("Professor de Direito Digital 🔎🤖")
-    st.caption("Assistente IA para ensino e capacitação em provas digitais e forense computacional.")
+    st.caption("Assistente IA para ensino de Direito Digital.")
 
     # Verifica inicialização essencial (OpenAI embeddings e cliente)
     global embeddings, openai_client_instance
@@ -2161,11 +2161,15 @@ def main():
                             papel_parte = "Desenvolvimento"
                             instrucoes_parte = f"""Instruções para a Parte 2 (Desenvolvimento):
 1.  **Objetivo:** Elabore APENAS o desenvolvimento da resposta, detalhando os pontos esboçados na introdução (Parte 1).
-2.  **Aprofundamento:** Use extensivamente os trechos RAG fornecidos para explicar, detalhar, exemplificar e analisar cada ponto principal.
-3.  **Conexão:** Garanta que o desenvolvimento flua logicamente a partir da introdução. Se necessário, use frases de conexão.
-4.  **Fundamentação e Citação:** Cite PRECISAMENTENTE as fontes RAG para CADA informação ou argumento apresentado (ex: "O procedimento X é descrito em Doc 'ManualY' | Chunk#15..."). Use *apenas* os trechos fornecidos. NÃO use conhecimento externo.
-5.  **NÃO CONCLUA:** Evite sumarizar ou concluir a resposta nesta parte. Foque apenas em apresentar e detalhar os argumentos e informações.
-6.  **Linguagem:** Mantenha o tom técnico, claro, objetivo e didático."""
+2.  **Aprofundamento Didático:** Use extensivamente os trechos RAG fornecidos para:
+    * **Explicar detalhadamente** cada ponto principal, definindo termos e clarificando conceitos como se estivesse ensinando.
+    * **Fornecer exemplos concretos** ou analogias que ilustrem esses pontos, baseados nas fontes RAG ou em cenários plausíveis derivados delas, desde que deixe claro que a base não é o RAG.
+    * **Descrever processos ou mecanismos** técnicos ou jurídicos mencionados de forma clara, sequencial e compreensível. Evite tópicos muito curtos. Desenvolva com trechos do RAG. Transcreva se for relevante. 
+    * Analisar as implicações práticas ou teóricas dos pontos discutidos.
+3.  **Conexão:** Garanta que o desenvolvimento flua logicamente a partir da introdução.
+4.  **Fundamentação e Citação:** Cite PRECISAMENTENTE as fontes RAG para CADA informação ou argumento apresentado (ex: "Conforme Doc 'ManualY' | Chunk#15, o procedimento é..."). Use *apenas* os trechos fornecidos.
+5.  **NÃO CONCLUA:** Evite sumarizar ou concluir a resposta nesta parte. Foque apenas na explicação e detalhamento.
+6.  **Linguagem:** Mantenha o tom técnico quando necessário, mas sempre buscando a **máxima clareza, descrição e didática**."""
 
                         elif parte_num == 3:
                             # == PARTE 3: FOCO EXCLUSIVO NA CONCLUSÃO ==
@@ -2182,8 +2186,19 @@ def main():
                              instrucoes_parte = "Continue a resposta de forma coerente."
 
                         # Monta o prompt atual com as instruções específicas da parte
-                        prompt_atual = f"""Você é o Professor de Direito Digital, um assistente IA especialista em ensino e capacitação em Direito Digital. Sua tarefa é gerar uma parte específica de uma resposta estruturada (Introdução, Desenvolvimento, Conclusão) à pergunta do usuário, baseando-se EXCLUSIVAMENTE nos trechos RAG fornecidos.
+                        prompt_atual = f"""Você é um Professor de Direito Digital, um assistente de IA especialista em ensino e capacitação em Direito Digital e Legal StoryTelling. Sua tarefa é gerar uma resposta estruturada (Introdução, Desenvolvimento, Conclusão) à pergunta do usuário, baseando-se EXCLUSIVAMENTE nos trechos RAG fornecidos.
 
+Siga estas diretrizes gerais:
+- Responda em Português (Brasil).
+- Use um tom claro, objetivo e **pedagógico.**
+- Baseie TODAS as afirmações nos trechos RAG fornecidos. NÃO use conhecimento externo.
+- Cite as fontes RAG relevantes conforme instruído para cada parte.
+- **Explique conceitos técnicos ou jurídicos complexos de forma simples, como se estivesse ensinando.**
+- **Use analogias ou exemplos práticos para ilustrar pontos abstratos sempre que possível.**
+- **Defina termos-chave (jurídicos ou técnicos) importantes na primeira vez que aparecerem.**
+- **Detalhe processos ou mecanismos de forma clara e sequencial.**
+- Se encontrar informações conflitantes entre fontes gerais (documentos, anexos) e fontes de feedback/análise complementar, priorize a informação vinda do feedback.
+                        
 ### PERGUNTA ORIGINAL DO USUÁRIO ###
 {st.session_state.query}
 
