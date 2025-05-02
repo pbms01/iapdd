@@ -18,6 +18,7 @@ from langchain_community.llms import OpenAI # Mantido para compatibilidade com t
 from langchain.schema import Document as LangChainDocument
 import chromadb
 from chromadb import EphemeralClient
+from chromadb.config import Settings
 # --- OpenAI Imports ---
 from openai import OpenAIError, OpenAI as OpenAIClient # Cliente principal renomeado
 
@@ -174,15 +175,14 @@ def criar_e_executar_llm(prompt, model_name, temperature=0.2, max_tokens=1000):
                 model=model_name,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                stream=True,
             )
-            # Verifica se a resposta e a mensagem existem
-            if response.choices and response.choices[0].message and response.choices[0].message.content:
-                return response.choices[0].message.content
-            else:
-                st.error(f"Resposta inesperada da API para {model_name}: {response}")
-                return "[Erro: Resposta API inesperada ou vazia]"
-        # Verifica se é um modelo de Completions legado (Davinci)
+            # MODIFICAÇÃO: Iterar e usar yield em vez de return
+            for chunk in response:
+                content = chunk.choices[0].delta.content
+                if content is not None:
+                    yield content # <-- Retorna cada pedaço de conteúdo recebido
         elif "davinci" in model_name:
              st.warning(f"Usando modelo legado '{model_name}'. Considere migrar para modelos mais recentes.")
              try:
@@ -191,13 +191,14 @@ def criar_e_executar_llm(prompt, model_name, temperature=0.2, max_tokens=1000):
                     model=model_name,
                     prompt=prompt,
                     temperature=temperature,
-                    max_tokens=max_tokens
+                    max_tokens=max_tokens,
+                    stream=True,
                  )
-                 if response.choices and response.choices[0].text:
-                     return response.choices[0].text
-                 else:
-                     st.error(f"Resposta inesperada (legado) para {model_name}: {response}")
-                     return "[Erro: Resposta API legada inesperada ou vazia]"
+               # MODIFICAÇÃO 2 (Legado): Iterar e usar yield
+                 for chunk in response:
+                      content = chunk.choices[0].text
+                      if content is not None:
+                          yield content # <-- Retorna cada pedaço de texto recebido
              except Exception as legacy_err:
                  st.error(f"Erro ao chamar modelo legado {model_name}: {legacy_err}")
                  raise legacy_err
@@ -207,35 +208,61 @@ def criar_e_executar_llm(prompt, model_name, temperature=0.2, max_tokens=1000):
 
     except OpenAIError as api_err:
         st.error(f"Erro na API OpenAI ({model_name}): {api_err}")
-        raise api_err # Re-levanta para ser tratado no bloco principal
+        # Decide como lidar com o erro no stream, talvez retornar uma mensagem de erro?
+        yield f"[Erro API: {api_err}]"
+        # raise api_err # Ou re-levantar o erro se preferir parar tudo
     except Exception as e:
         st.error(f"Erro genérico ao executar LLM ({model_name}): {str(e)}")
         st.code(traceback.format_exc()) # Mostra mais detalhes do erro
-        raise e # Re-levanta
+        yield f"[Erro Streaming: {str(e)}]"
+        # raise e # Ou re-levantar
 
 # Função para testar a API OpenAI
+
 def testar_openai(model_name="gpt-4o"):
     if not os.getenv("OPENAI_API_KEY"):
         return False, "Chave da API OpenAI não configurada."
     global openai_client_instance
     if openai_client_instance is None:
         return False, "Cliente OpenAI (openai_client_instance) não inicializado."
-    try:
-        # Usa um prompt simples e espera uma resposta curta
-        resposta = criar_e_executar_llm(
+    try: # Outer try block
+        # Chama o gerador modificado que usa yield
+        response_stream = criar_e_executar_llm(
             prompt="Teste de API. Responda apenas com a palavra 'OK'.",
             model_name=model_name,
             temperature=0,
             max_tokens=10
         )
-        resposta_limpa = resposta.strip().lower() if resposta else ""
-        # Verifica se a resposta contém 'ok' (mais flexível que igualdade exata)
+
+        # Acumula a resposta completa a partir do stream (gerador)
+        resposta_completa = ""
+        try: # Inner try block
+            # Itera sobre os chunks (strings) yieldados pela função
+            for chunk in response_stream:
+                resposta_completa += chunk
+        except Exception as e_stream_test:
+            # Se ocorrer um erro DURANTE a iteração do stream de teste
+            return False, f"Erro ao consumir stream durante teste com {model_name}: {e_stream_test}"
+
+        # Processa a resposta completa acumulada APÓS o stream terminar
+        resposta_limpa = resposta_completa.strip().lower() if resposta_completa else ""
+
+        # Verifica se a resposta acumulada contém 'ok'
         if "ok" in resposta_limpa:
-            return True, f"Conexão OK com {model_name}. Resposta recebida: '{resposta.strip()}'"
+            return True, f"Conexão OK com {model_name}. Resposta recebida: '{resposta_completa.strip()}'"
         else:
-            return False, f"Resposta inesperada de {model_name}: '{resposta.strip() if resposta else 'N/A'}'. Esperava conter 'OK'."
-    except Exception as e:
-        return False, f"Erro durante o teste de conexão com {model_name}: {str(e)}"
+            # Verifica se a resposta acumulada contém uma mensagem de erro yieldada
+            if "[Erro" in resposta_completa:
+                # A API retornou um erro que foi yieldado pela criar_e_executar_llm
+                return False, f"Erro retornado pela API durante teste com {model_name}: '{resposta_completa.strip()}'"
+            else:
+                # A resposta não continha 'ok' e nem uma mensagem de erro esperada
+                return False, f"Resposta inesperada de {model_name}: '{resposta_completa.strip() if resposta_completa else 'N/A'}'. Esperava conter 'OK'."
+
+    except Exception as e: # Outer except block
+        # Captura erros gerais que podem ocorrer ANTES ou DEPOIS do streaming
+        # (ex: erro ao chamar criar_e_executar_llm, erro no strip, etc.)
+        return False, f"Erro geral durante o teste de conexão com {model_name}: {str(e)}"
 
 #======================================================================
 # FUNÇÃO DE PRÉ-PROCESSAMENTO DE TEXTO
@@ -429,8 +456,9 @@ def carregar_txt(path):
 
 # Função wrapper para carregar diferentes tipos de arquivo
 def carregar_arquivo(path, is_attachment=False):
-    st.warning(f"DEBUG (carregar_arquivo): Função chamada com path='{path}', is_attachment={is_attachment}") # <-- Adicionar log 1
-    
+    # Removido log de DEBUG
+    # st.warning(f"DEBUG (carregar_arquivo): Função chamada com path='{path}', is_attachment={is_attachment}") # <-- Remover log 1
+
     """
     Carrega um arquivo (TXT, PDF, DOCX).
     Para indexação principal (não anexo), geralmente se espera TXT da pasta OCR.
@@ -444,7 +472,8 @@ def carregar_arquivo(path, is_attachment=False):
 
     ext = os.path.splitext(path)[1].lower()
     nome_base = os.path.basename(path)
-    st.warning(f"DEBUG (carregar_arquivo): Ext extraída='{ext}', nome_base='{nome_base}'") # <-- Adicionar log 2
+    # Removido log de DEBUG
+    # st.warning(f"DEBUG (carregar_arquivo): Ext extraída='{ext}', nome_base='{nome_base}'") # <-- Remover log 2
 
     try:
         if ext == ".txt":
@@ -696,6 +725,10 @@ def indexar_documentos(docs_chunked):
         st.error("Erro: a função indexar_documentos espera uma lista de objetos LangChainDocument.")
         return 0
 
+    # Variáveis para UI de progresso
+    progress_bar_index = None
+    status_text_index = None
+
     try:
         # Carrega a instância do ChromaDB
         db = carregar_chroma()
@@ -750,8 +783,8 @@ def indexar_documentos(docs_chunked):
 
                  total_chunks_indexed += len(current_batch)
                  progress_percentage = min(1.0, total_chunks_indexed / total_chunks_to_process)
-                 progress_bar_index.progress(progress_percentage)
-                 status_text_index.text(f"Indexando {total_chunks_indexed}/{total_chunks_to_process} chunks...")
+                 if progress_bar_index: progress_bar_index.progress(progress_percentage) # Verifica se existe
+                 if status_text_index: status_text_index.text(f"Indexando {total_chunks_indexed}/{total_chunks_to_process} chunks...") # Verifica se existe
 
             except Exception as batch_error:
                  erros_indexacao += 1
@@ -760,8 +793,9 @@ def indexar_documentos(docs_chunked):
                  # st.text(f"Primeiro texto do lote com erro:\n{batch_texts[0][:200]}...")
                  continue # Tenta o próximo lote
 
-        # Limpa barra de progresso e texto de status
-        progress_bar_index.empty(); status_text_index.empty()
+        # Limpa barra de progresso e texto de status (se foram criados)
+        if progress_bar_index: progress_bar_index.empty()
+        if status_text_index: status_text_index.empty()
 
         # Persiste as alterações no disco APÓS processar todos os lotes
         if total_chunks_indexed > 0:
@@ -787,8 +821,8 @@ def indexar_documentos(docs_chunked):
         st.error(f"Erro geral durante o processo de indexação: {str(e)}")
         st.code(traceback.format_exc())
         # Garante limpeza da UI em caso de erro
-        if 'progress_bar_index' in locals(): progress_bar_index.empty()
-        if 'status_text_index' in locals(): status_text_index.empty()
+        if progress_bar_index: progress_bar_index.empty()
+        if status_text_index: status_text_index.empty()
         return 0
 
 
@@ -835,9 +869,15 @@ def indexar_pasta_completa(caminho_textos, recursive=True):
     total_arquivos = len(arquivos_filtrados)
 
     # UI de Progresso para Leitura/Divisão
-    progress_leitura = st.progress(0.0)
-    status_text_leitura = st.empty()
-    status_text_leitura.text(f"Lendo e processando arquivos .txt (0/{total_arquivos})...")
+    progress_leitura = None
+    status_text_leitura = None
+    try:
+        progress_leitura = st.progress(0.0)
+        status_text_leitura = st.empty()
+        status_text_leitura.text(f"Lendo e processando arquivos .txt (0/{total_arquivos})...")
+    except Exception as e_ui_init:
+        st.warning(f"Não foi possível criar elementos de UI para progresso da leitura: {e_ui_init}")
+
 
     # Parâmetros de chunking (podem ser configuráveis na UI no futuro)
     # Valores maiores de chunk_size podem ser melhores para RAG, dependendo do modelo
@@ -846,7 +886,7 @@ def indexar_pasta_completa(caminho_textos, recursive=True):
 
     for i, arquivo in enumerate(arquivos_filtrados):
         nome_arq = os.path.basename(arquivo)
-        status_text_leitura.text(f"Processando {i+1}/{total_arquivos}: {nome_arq}")
+        if status_text_leitura: status_text_leitura.text(f"Processando {i+1}/{total_arquivos}: {nome_arq}")
         # st.text(f"Processando: {arquivo}") # Mais detalhe (opcional)
 
         try:
@@ -919,10 +959,11 @@ def indexar_pasta_completa(caminho_textos, recursive=True):
             arquivos_com_erro += 1
 
         # Atualiza progresso da leitura/divisão
-        progress_leitura.progress(min(1.0, (i + 1) / total_arquivos))
+        if progress_leitura: progress_leitura.progress(min(1.0, (i + 1) / total_arquivos))
 
     # Limpa UI de progresso da leitura
-    progress_leitura.empty(); status_text_leitura.empty()
+    if progress_leitura: progress_leitura.empty()
+    if status_text_leitura: status_text_leitura.empty()
 
     # Verifica se algum chunk foi gerado no total
     if not todos_os_chunks:
@@ -1351,7 +1392,8 @@ def salvar_feedback(pergunta, resposta, feedback_texto, classificacao, arquivos_
                      continue # Pula para o próximo anexo se não puder salvar
 
                 # Carrega o conteúdo do anexo salvo (TXT, PDF, DOCX)
-                st.warning(f"DEBUG (salvar_feedback): Chamando carregar_arquivo para path='{caminho_arquivo_fb}', Nome original='{file_upload.name}'") # <-- Adicionar log
+                # Removido log de DEBUG
+                # st.warning(f"DEBUG (salvar_feedback): Chamando carregar_arquivo para path='{caminho_arquivo_fb}', Nome original='{file_upload.name}'") # <-- Remover log
                 docs_carregados_info = carregar_arquivo(caminho_arquivo_fb, is_attachment=True)
 
                 # Verifica se o carregamento foi válido e tem conteúdo
@@ -1539,6 +1581,15 @@ def main():
     st.title("Professor de Direito Digital 🔎🤖")
     st.caption("Assistente IA para ensino de Direito Digital.")
 
+    # --- SOLUÇÃO INICIALIZAÇÃO ---
+    # Inicializa variáveis que podem causar UnboundLocalError
+    analysis_placeholder = None
+    response_placeholder = None
+    prompt_unico = None
+    status_text = None
+    progress_bar = None
+    # ------------------------------
+
     # Verifica inicialização essencial (OpenAI embeddings e cliente)
     global embeddings, openai_client_instance
     if embeddings is None or openai_client_instance is None:
@@ -1586,11 +1637,24 @@ def main():
         'feedback_submitted': False, # Flag para controlar exibição do form de feedback
         'cached_fontes': None, # Cache da lista de fontes indexadas
         'df_feedback_audit': None, # DataFrame para auditoria de feedback
-        'feedback_loaded': False # Flag para auditoria de feedback
+        'feedback_loaded': False, # Flag para auditoria de feedback
+        'ephemeral_chroma_client': None, # Para o cliente dos anexos temporários
         }
     for key, default_value in default_session_state.items():
         if key not in st.session_state:
             st.session_state[key] = default_value
+
+    # Inicializa o cliente ChromaDB efêmero UMA VEZ por sessão
+    # Verifica existência da chave E se o valor é None
+    if 'ephemeral_chroma_client' not in st.session_state or st.session_state.ephemeral_chroma_client is None:
+        try:
+           st.session_state.ephemeral_chroma_client = chromadb.EphemeralClient(
+               settings=Settings(allow_reset=True, anonymized_telemetry=False) # <-- Permite reset e opcionalmente desabilita telemetria
+            )
+            # st.info("Cliente ChromaDB efêmero inicializado para a sessão.") # Log opcional
+        except Exception as e_init_eph:
+            st.error(f"Falha crítica ao inicializar cliente ChromaDB efêmero: {e_init_eph}. Anexos temporários podem não funcionar.")
+            # Considere st.stop() se for essencial
 
     # --- Sidebar ---
     with st.sidebar:
@@ -1638,13 +1702,13 @@ def main():
             help="Valores mais baixos geram respostas mais focadas e determinísticas. Valores mais altos geram respostas mais criativas e variadas."
         )
         # Define o máximo de tokens desejados, limitado pelo output do modelo
-        # Ajustado valor padrão para ser um pouco menor, considerando multi-partes
-        default_response_tokens = min(1500, model_max_output)
+        # Ajusta valor padrão se necessário (ex: 3000 ou manter 1500)
+        default_response_tokens = min(3000, model_max_output) # Exemplo: aumentado padrão
         desired_max_tokens = st.number_input(
-            "Máximo de Tokens por Resposta (Parte):",
+            "Máximo de Tokens por Resposta:", # <-- Label Atualizado
             min_value=100, max_value=model_max_output, value=default_response_tokens, step=100,
             key="desired_max_tokens", # Chave para o estado
-            help=f"Define o limite máximo de tokens para *cada parte* da resposta gerada. O limite real do modelo é {model_max_output}."
+            help=f"Define o limite máximo de tokens para a resposta completa gerada. O limite de saída do modelo selecionado é {model_max_output}." # <-- Help Text Atualizado
         )
         use_feedback_in_context = st.checkbox(
             "Considerar feedback/análises anteriores nas buscas RAG",
@@ -1921,120 +1985,131 @@ def main():
             # Reseta estado da resposta anterior antes de iniciar nova análise
             st.session_state.update({'resposta': "", 'fontes_usadas': [], 'timestamp': None, 'feedback_submitted': False, 'current_query_for_feedback': st.session_state.query})
 
-            # Placeholder para UI de progresso
-            analysis_placeholder = st.empty()
-            with analysis_placeholder.container():
-                progress_bar = st.progress(0.0)
-                status_text = st.info("🧠 Preparando para análise...")
-
             temp_paths_to_clean = [] # Lista para guardar caminhos de arquivos temporários a limpar
             docs_temp_chunks = [] # Lista para guardar chunks dos arquivos temporários
 
+            # --- BLOCO TRY PRINCIPAL ---
             try:
-                # ===============================================================
-                # == INÍCIO DO BLOCO DE ANÁLISE MULTI-RESPOSTA ==
-                # ===============================================================
+                # --- SOLUÇÃO: Criação UI de Análise ---
+                # Cria placeholder de análise ANTES de qualquer operação que possa falhar
+                analysis_placeholder = st.empty()
+                # Define variáveis de UI dentro do try para garantir o escopo
+                progress_bar = None
+                status_text = None
+                with analysis_placeholder.container():
+                    progress_bar = st.progress(0.0)
+                    status_text = st.info("🧠 Preparando para análise...")
+                # --------------------------------------
 
                 # Etapa 1: Processar anexos temporários (Uploads)
-                progress_bar.progress(0.05, text="Verificando anexos...")
+                if progress_bar: progress_bar.progress(0.05, text="Verificando anexos...")
                 if files_uploaded:
-                    status_text.info(f"📄 Processando {len(files_uploaded)} anexo(s) temporário(s)...")
+                    if status_text: status_text.info(f"📄 Processando {len(files_uploaded)} anexo(s) temporário(s)...")
                     os.makedirs(SUBPASTA_TEMP, exist_ok=True) # Garante que a pasta temp existe
                     for i, f in enumerate(files_uploaded):
-                        # Atualiza progresso e status
-                        progress_percentage = 0.05 + ((i + 1) / len(files_uploaded)) * 0.15 # Progresso de 5% a 20%
-                        progress_bar.progress(progress_percentage, text=f"Lendo anexo: {f.name}")
+                            # Atualiza progresso e status
+                            progress_percentage = 0.05 + ((i + 1) / len(files_uploaded)) * 0.15 # Progresso de 5% a 20%
+                            if progress_bar: progress_bar.progress(progress_percentage, text=f"Lendo anexo: {f.name}")
 
-                        # Salva anexo temporariamente
-                        tmp_path = os.path.join(SUBPASTA_TEMP, f"{datetime.datetime.now().timestamp()}_{f.name}")
-                        temp_paths_to_clean.append(tmp_path) # Adiciona à lista para limpeza posterior
-                        try:
-                            with open(tmp_path, "wb") as fp:
-                                fp.write(f.getvalue())
+                            # Salva anexo temporariamente
+                            tmp_path = os.path.join(SUBPASTA_TEMP, f"{datetime.datetime.now().timestamp()}_{f.name}")
+                            temp_paths_to_clean.append(tmp_path) # Adiciona à lista para limpeza posterior
+                            try:
+                                with open(tmp_path, "wb") as fp:
+                                    fp.write(f.getvalue())
 
-                            # Carrega e pré-processa o conteúdo do anexo salvo
-                            loaded_info = carregar_arquivo(tmp_path, is_attachment=True)
+                                # Carrega e pré-processa o conteúdo do anexo salvo
+                                loaded_info = carregar_arquivo(tmp_path, is_attachment=True)
 
-                            # Verifica se carregou com sucesso e tem conteúdo válido
-                            conteudo_valido_anexo = False
-                            if (loaded_info and isinstance(loaded_info, list) and len(loaded_info) > 0 and
-                                    isinstance(loaded_info[0], dict) and loaded_info[0].get("page_content") and
-                                    not loaded_info[0]["page_content"].strip().startswith(("[Erro", "[Aviso","[Conteúdo vazio"))):
-                                conteudo_valido_anexo = True
+                                # Verifica se carregou com sucesso e tem conteúdo válido
+                                conteudo_valido_anexo = False
+                                if (loaded_info and isinstance(loaded_info, list) and len(loaded_info) > 0 and
+                                        isinstance(loaded_info[0], dict) and loaded_info[0].get("page_content") and
+                                        not loaded_info[0]["page_content"].strip().startswith(("[Erro", "[Aviso","[Conteúdo vazio"))):
+                                    conteudo_valido_anexo = True
 
-                            if conteudo_valido_anexo:
-                                # Adiciona metadados indicando origem temporária
-                                for item in loaded_info:
-                                    if not isinstance(item.get('metadata'), dict): item['metadata'] = {}
-                                    item['metadata'].update({'origin': 'temporary_attachment', 'original_filename': f.name})
+                                if conteudo_valido_anexo:
+                                    # Adiciona metadados indicando origem temporária
+                                    for item in loaded_info:
+                                        if not isinstance(item.get('metadata'), dict): item['metadata'] = {}
+                                        item['metadata'].update({'origin': 'temporary_attachment', 'original_filename': f.name})
 
-                                # Divide o conteúdo do anexo em chunks
-                                # Usar chunk_size menor para anexos pode ser útil
-                                chunks_anexo_temp = dividir_documentos(loaded_info, chunk_size=512, chunk_overlap=50)
-                                if chunks_anexo_temp:
-                                    docs_temp_chunks.extend(chunks_anexo_temp) # Acumula os chunks
-                            else:
-                                st.warning(f"⚠️ Anexo temporário '{f.name}' inválido, vazio ou com erro no carregamento. Será ignorado.")
-                        except Exception as e_tmp:
-                            st.warning(f"⚠️ Erro ao processar anexo temporário '{f.name}': {e_tmp}")
-                    progress_bar.progress(0.20, text="Anexos temporários processados.")
+                                    # Divide o conteúdo do anexo em chunks
+                                    # Usar chunk_size menor para anexos pode ser útil
+                                    chunks_anexo_temp = dividir_documentos(loaded_info, chunk_size=512, chunk_overlap=50)
+                                    if chunks_anexo_temp:
+                                        docs_temp_chunks.extend(chunks_anexo_temp) # Acumula os chunks
+                                else:
+                                    st.warning(f"⚠️ Anexo temporário '{f.name}' inválido, vazio ou com erro no carregamento. Será ignorado.")
+                            except Exception as e_tmp:
+                                st.warning(f"⚠️ Erro ao processar anexo temporário '{f.name}': {e_tmp}")
+                    if progress_bar: progress_bar.progress(0.20, text="Anexos temporários processados.")
                 else:
-                    progress_bar.progress(0.20, text="Nenhum anexo temporário fornecido.") # Pula para 20%
+                    if progress_bar: progress_bar.progress(0.20, text="Nenhum anexo temporário fornecido.") # Pula para 20%
 
                 # Etapa 2: Preparar Retrievers (Principal e Temporário)
-                status_text.info("🔍 Preparando busca RAG (Base Principal)...")
-                progress_bar.progress(0.25, text="Carregando base de dados principal...")
+                if status_text: status_text.info("🔍 Preparando busca RAG (Base Principal)...")
+                if progress_bar: progress_bar.progress(0.25, text="Carregando base de dados principal...")
                 db_principal = carregar_chroma() # Carrega o DB persistente
                 if db_principal is None:
                     # Erro crítico, não pode continuar sem DB principal
-                    status_text.error("❌ Falha crítica ao carregar a base de dados principal. Análise abortada.")
-                    progress_bar.progress(1.0)
-                    st.stop() # Interrompe a execução
+                    err_msg = "❌ Falha crítica ao carregar a base de dados principal. Análise abortada."
+                    if status_text: status_text.error(err_msg)
+                    else: st.error(err_msg)
+                    if progress_bar: progress_bar.progress(1.0)
+                    # Não usar st.stop() dentro do try/except, levantar exceção
+                    raise RuntimeError("Falha ao carregar DB principal.")
 
                 # Cria retriever para o DB principal
                 # k_ind: número de chunks a buscar SÓ da base principal (ajuste conforme necessidade)
-                k_ind = 100 # Exemplo: busca até 50 chunks da base principal
+                k_ind = 100 # Exemplo: busca até 100 chunks da base principal
                 retrievers = [db_principal.as_retriever(search_kwargs={"k": k_ind})]
                 st.info(f"Retriever da base principal pronto (k={k_ind}).")
 
                 # Cria retriever para os anexos temporários (se houver chunks deles)
                 if docs_temp_chunks:
-                    progress_bar.progress(0.30, text="Criando índice temporário para anexos...")
-                    status_text.info("⚙️ Criando índice em memória para anexos...")
+                    if progress_bar: progress_bar.progress(0.30, text="Criando índice temporário para anexos...")
+                    if status_text: status_text.info("⚙️ Criando índice em memória para anexos...")
+                    db_temp = None
+
                     try:
-                        # 1. Instancia um cliente ChromaDB efêmero (em memória, local)
-                        from chromadb.config import Settings
+                        # 1. Recupera o cliente efêmero da sessão
+                        temp_client = st.session_state.ephemeral_chroma_client
+                        if temp_client is None:
+                           raise Exception("Cliente ChromaDB efêmero não está inicializado na sessão.")
 
-                        # Inicializa EphemeralClient com configurações explícitas para garantir isolamento
-                        temp_client = chromadb.EphemeralClient() # Usa os padrões do cliente efêmero
+                        # 2. *** RESETAR O CLIENTE ANTES DE USAR ***
+                        temp_client.reset()
+                        # st.info("Cliente efêmero resetado.") # Log opcional
 
-                        # 2. Cria o ChromaDB temporário usando o cliente efêmero explicitamente
-                        # Em vez de from_documents, inicializa Chroma e depois adiciona os documentos
+                        # 3. Cria o ChromaDB temporário usando o cliente efêmero RESETADO
+                        collection_name_temp = f"temp_collection_{datetime.datetime.now().timestamp()}"
                         db_temp = Chroma(
-                        client=temp_client, # Passa o cliente efêmero
-                        embedding_function=embeddings,
-                        # Pode definir um nome de coleção único se quiser, mas EphemeralClient geralmente isola bem
-                        collection_name=f"temp_collection_{datetime.datetime.now().timestamp()}"
+                            client=temp_client, # Passa o cliente efêmero reutilizado e resetado
+                            embedding_function=embeddings,
+                            collection_name=collection_name_temp # Nome único continua importante
                         )
-                        # Adiciona os documentos à coleção recém-criada
-                        db_temp.add_documents(docs_temp_chunks)
 
                         # k_temp: número de chunks a buscar SÓ dos anexos (geralmente menor)
-                        k_temp = 30 # Exemplo: busca até 30 chunks dos anexos
+                        k_temp = 15 # Exemplo: busca até 15 chunks dos anexos
+                        db_temp.add_documents(docs_temp_chunks)
                         retrievers.append(db_temp.as_retriever(search_kwargs={"k": k_temp}))
+                        # ------------------------
+
                         st.info(f"Retriever temporário para anexos pronto (k={k_temp}). Total retrievers: {len(retrievers)}")
-                        progress_bar.progress(0.40, text="Índice temporário criado.")
+                        if progress_bar: progress_bar.progress(0.40, text="Índice temporário criado.")
                     except Exception as e_mem_db:
                         st.error(f"Erro ao criar índice temporário em memória para anexos: {str(e_mem_db)}. Anexos podem não ser consultados.")
-                        progress_bar.progress(0.40) # Continua sem o retriever temp se falhar
+                        st.code(traceback.format_exc())
+                        if progress_bar: progress_bar.progress(0.40) # Continua sem o retriever temp se falhar
                 else:
-                    progress_bar.progress(0.40) # Pula para 40% se não houver anexos
+                    if progress_bar: progress_bar.progress(0.40) # Pula para 40% se não houver anexos
 
                 # Etapa 3: Buscar Documentos (RAG) usando todos os retrievers
-                status_text.info("📚 Combinando resultados da busca RAG...")
+                if status_text: status_text.info("📚 Combinando resultados da busca RAG...")
                 # k_rag: número MÁXIMO de chunks a serem combinados e enviados ao LLM
                 k_rag = 130 # Ajuste este valor para balancear contexto e tamanho da resposta
-                progress_bar.progress(0.50, text=f"Buscando e combinando até {k_rag} chunks RAG...")
+                if progress_bar: progress_bar.progress(0.50, text=f"Buscando e combinando até {k_rag} chunks RAG...")
 
                 # Chama a função que busca em todos os retrievers e combina/filtra
                 docs_combinados = combinar_resultados(
@@ -2098,265 +2173,219 @@ def main():
                     st.session_state['fontes_usadas'] = [] # Garante que está vazio se não houver docs
 
 
-                # Etapa 4: Gerar Resposta (Multi-chamada)
+                # <<< INÍCIO DO PROMPTING >>>
+
+                # Etapa 4: Construir Prompt Único e Gerar Resposta (Chamada Única)
+
                 model_name_selected = st.session_state.model_choice_selector
                 model_context_limit = obter_limite_contexto(model_name_selected)
                 model_output_limit = obter_limite_output(model_name_selected)
-                safety_buffer = 250 # Aumenta buffer por segurança com prompts maiores
-                respostas_geradas = [] # Lista para guardar as partes da resposta
+                safety_buffer = 300 # Buffer de segurança para tokens do prompt
 
-                # Define quantas partes tentar gerar
-                NUM_PARTES = 3
+                # Define o prompt único com estrutura condicional
+                prompt_unico = f"""### PERSONA ###
+Você é o "Professor de Direito Digital", um assistente de IA especialista em Direito Digital, forense computacional, análise de prova digital e Legal Storytelling. Seu objetivo é (1) ensinar conceitos de direito e perícia digital de forma clara e didática ou (2) analisar criticamente documentos (decisões, laudos, relatórios) relacionados à prova digital, identificando qualidades, falhas e recomendando ações.
 
-                if not docs_combinados: # --- Caso Sem RAG ---
-                    status_text.info("⚠️ Nenhuma informação RAG encontrada. Gerando resposta geral...")
-                    progress_bar.progress(0.75, text="Gerando resposta geral...")
-                    prompt_geral = f"Você é CyberEvidence Oracle (IA jurídica/técnica). Sem informações específicas recuperadas, responda à pergunta abaixo baseado em conhecimento geral sobre o tópico, indicando claramente a ausência de fontes específicas consultadas para esta resposta.\n\nPergunta: {st.session_state.query}\n\nResposta Geral:"
-                    try:
-                        # Calcula max_tokens para resposta geral
-                        prompt_tokens_geral = estimar_tokens(prompt_geral, model_name_selected)
-                        available_completion_geral = model_context_limit - prompt_tokens_geral - safety_buffer
-                        if available_completion_geral < 100: # Mínimo de tokens para gerar algo útil
-                             st.error("Espaço insuficiente para gerar resposta geral com o modelo selecionado.")
-                             raise ValueError("Contexto insuficiente para resposta geral.")
+### DIRETRIZES GERAIS ###
+- Responda SEMPRE em Português do Brasil.
+- Utilize um tom claro, objetivo, preciso e pedagógico.
+- Fundamente TODAS as afirmações TÉCNICAS e JURÍDICAS **EXCLUSIVAMENTE** nos [TRECHOS RAG CONSULTADOS] abaixo. **NÃO use conhecimento externo.**
+- Cite explicitamente a fonte RAG específica para cada informação relevante (ex: "Segundo [Fonte RAG #5 - ISO 27037 | Chunk#2], a preservação exige...").
+- Ao analisar documentos anexados (identificados como 'Anexo Temp' ou 'Anexo Feedback'), **refira-se ao conteúdo citando a página correspondente**, se possível inferir ou se presente no texto (ex: "Na página 15 do laudo [Anexo Temp: laudo_xyz.pdf | Chunk#10], observa-se que...").
+- Explique conceitos técnicos/jurídicos complexos de forma simples. Use analogias se apropriado.
+- Defina termos-chave importantes.
+- Detalhe processos (técnicos ou legais) de forma sequencial e clara.
+- Se houver informações de fontes de 'Feedback' ou 'Análise Complementar' no RAG que contradigam outras fontes, **priorize e sinalize a informação vinda do feedback.**
 
-                        actual_max_tokens_geral = max(100, min(st.session_state.desired_max_tokens, available_completion_geral, model_output_limit))
+### CONTEXTO DA CONSULTA ###
+- **Pergunta Original do Usuário:** {st.session_state.query}
+- **Tipo de Consulta (Inferido por você):** [Determine se é uma pergunta geral para ensino OU uma solicitação de análise de documento(s) anexado(s)]
 
-                        resposta_gerada = criar_e_executar_llm(
-                            prompt=prompt_geral,
-                            model_name=model_name_selected,
-                            temperature=st.session_state.temperature_slider,
-                            max_tokens=actual_max_tokens_geral
-                        )
-                        if resposta_gerada and resposta_gerada.strip():
-                            respostas_geradas.append(f"{resposta_gerada.strip()}\n\n---\n*Nota: Resposta baseada em conhecimento geral (sem consulta RAG específica). Modelo: {model_name_selected}*")
-                        else:
-                             respostas_geradas.append("[Erro: Resposta geral retornou vazia]")
-                    except Exception as e_geral:
-                        st.error(f"Erro ao gerar resposta geral: {e_geral}")
-                        respostas_geradas.append(f"[Erro ao gerar resposta geral: {e_geral}]")
-
-                else: # --- Caso Com RAG (Multi-chamada) ---
-                    prompt_atual = ""
-                    resposta_anterior_acumulada = "" # Acumula texto das respostas anteriores
-
-                for parte_num in range(1, NUM_PARTES + 1):
-                        progress_percentage = 0.55 + (parte_num * 0.30 / NUM_PARTES) # Distribui progresso
-                        progress_bar.progress(progress_percentage, text=f"Gerando Resposta (Parte {parte_num}/{NUM_PARTES})...")
-
-                        # Define o papel e as instruções específicas para cada parte
-                        if parte_num == 1:
-                            # == PARTE 1: FOCO EXCLUSIVO NA INTRODUÇÃO ==
-                            papel_parte = "Introdução"
-                            instrucoes_parte = f"""Instruções para a Parte 1 (Introdução):
-1.  **Objetivo:** Elabore APENAS a introdução da resposta à pergunta original.
-2.  **Contextualize:** Apresente brevemente o tema central da pergunta com base nos trechos RAG fornecidos.
-3.  **Estrutura:** Esboce os principais pontos que serão abordados nas partes seguintes (desenvolvimento e conclusão), criando um roteiro claro para o leitor. NÃO desenvolva esses pontos aqui.
-4.  **Fundamentação:** Baseie a contextualização e o esboço nos trechos RAG. Cite as fontes mais relevantes que dão o panorama geral (ex: "Os trechos de Anexo Temp 'relatorio.pdf' | Chunk#1 e Doc 'NormaXYZ' | Chunk#3 indicam que...").
-5.  **Linguagem:** Clara, objetiva, didática e em Português (Brasil).
-6.  **Tamanho:** Mantenha a introdução concisa e focada."""
-
-                        elif parte_num == 2:
-                            # == PARTE 2: FOCO EXCLUSIVO NO DESENVOLVIMENTO ==
-                            papel_parte = "Desenvolvimento"
-                            instrucoes_parte = f"""Instruções para a Parte 2 (Desenvolvimento):
-1.  **Objetivo:** Elabore APENAS o desenvolvimento da resposta, detalhando os pontos esboçados na introdução (Parte 1).
-2.  **Aprofundamento Didático:** Use extensivamente os trechos RAG fornecidos para:
-    * **Explicar detalhadamente** cada ponto principal, definindo termos e clarificando conceitos como se estivesse ensinando.
-    * **Fornecer exemplos concretos** ou analogias que ilustrem esses pontos, baseados nas fontes RAG ou em cenários plausíveis derivados delas, desde que deixe claro que a base não é o RAG.
-    * **Descrever processos ou mecanismos** técnicos ou jurídicos mencionados de forma clara, sequencial e compreensível. Evite tópicos muito curtos. Desenvolva com trechos do RAG. Transcreva se for relevante. 
-    * Analisar as implicações práticas ou teóricas dos pontos discutidos.
-3.  **Conexão:** Garanta que o desenvolvimento flua logicamente a partir da introdução.
-4.  **Fundamentação e Citação:** Cite PRECISAMENTENTE as fontes RAG para CADA informação ou argumento apresentado (ex: "Conforme Doc 'ManualY' | Chunk#15, o procedimento é..."). Use *apenas* os trechos fornecidos.
-5.  **NÃO CONCLUA:** Evite sumarizar ou concluir a resposta nesta parte. Foque apenas na explicação e detalhamento.
-6.  **Linguagem:** Mantenha o tom técnico quando necessário, mas sempre buscando a **máxima clareza, descrição e didática**."""
-
-                        elif parte_num == 3:
-                            # == PARTE 3: FOCO EXCLUSIVO NA CONCLUSÃO ==
-                            papel_parte = "Conclusão"
-                            instrucoes_parte = f"""Instruções para a Parte 3 (Conclusão):
-1.  **Objetivo:** Elabore APENAS a conclusão da resposta, sintetizando os pontos discutidos nas partes anteriores (Introdução e Desenvolvimento).
-2.  **Síntese:** Reafirme brevemente a ideia central da introdução e sumarize os principais argumentos/informações apresentados no desenvolvimento (Parte 2). NÃO introduza informações novas.
-3.  **Fechamento:** Ofereça uma consideração final ou um fechamento coeso para a análise, respondendo diretamente à pergunta original com base na síntese feita.
-4.  **Fundamentação:** A conclusão deve ser derivada logicamente das partes anteriores, que foram baseadas nos trechos RAG. Não é necessário repetir citações aqui, a menos que reforce um ponto chave da síntese.
-5.  **Linguagem:** Clara, concisa e objetiva."""
-
-                        else: # Fallback caso NUM_PARTES seja alterado
-                             papel_parte = f"Parte {parte_num}"
-                             instrucoes_parte = "Continue a resposta de forma coerente."
-
-                        # Monta o prompt atual com as instruções específicas da parte
-                        prompt_atual = f"""Você é um Professor de Direito Digital, um assistente de IA especialista em ensino e capacitação em Direito Digital e Legal StoryTelling. Sua tarefa é gerar uma resposta estruturada (Introdução, Desenvolvimento, Conclusão) à pergunta do usuário, baseando-se EXCLUSIVAMENTE nos trechos RAG fornecidos.
-
-Siga estas diretrizes gerais:
-- Responda em Português (Brasil).
-- Use um tom claro, objetivo e **pedagógico.**
-- Baseie TODAS as afirmações nos trechos RAG fornecidos. NÃO use conhecimento externo.
-- Cite as fontes RAG relevantes conforme instruído para cada parte.
-- **Explique conceitos técnicos ou jurídicos complexos de forma simples, como se estivesse ensinando.**
-- **Use analogias ou exemplos práticos para ilustrar pontos abstratos sempre que possível.**
-- **Defina termos-chave (jurídicos ou técnicos) importantes na primeira vez que aparecerem.**
-- **Detalhe processos ou mecanismos de forma clara e sequencial.**
-- Se encontrar informações conflitantes entre fontes gerais (documentos, anexos) e fontes de feedback/análise complementar, priorize a informação vinda do feedback.
-                        
-### PERGUNTA ORIGINAL DO USUÁRIO ###
-{st.session_state.query}
-
-### TRECHOS CONSULTADOS (Contexto RAG - Usar para TODAS as partes) ###
+### TRECHOS RAG CONSULTADOS (Base de Conhecimento e Anexos Temporários/Feedback) ###
 {contexto_formatado}
 ######################################
 
-### RESPOSTA DAS PARTES ANTERIORES (se houver) ###
-{resposta_anterior_acumulada if parte_num > 1 else "[Esta é a primeira parte, não há resposta anterior]"}
-######################################
+### TAREFA ESPECÍFICA ###
 
-### SUA TAREFA AGORA (Parte {parte_num} de {NUM_PARTES}: {papel_parte}) ###
-Siga RIGOROSAMENTE as instruções abaixo para gerar APENAS esta parte da resposta:
-{instrucoes_parte}
+**SE o Tipo de Consulta for 'Pergunta Geral para Ensino':**
+1.  Responda à pergunta do usuário de forma completa e didática.
+2.  Estruture a resposta logicamente (ex: Introdução definindo o escopo, Desenvolvimento explicando os pontos principais com base no RAG, Conclusão resumindo).
+3.  Siga rigorosamente as [DIRETRIZES GERAIS], especialmente quanto ao uso exclusivo do RAG e citações.
 
-### {papel_parte.upper()} (Parte {parte_num} de {NUM_PARTES}): ###""" # Header para o LLM começar a escrever
 
-                        # --- O restante da lógica do loop (estimar tokens, chamar LLM, acumular resposta) permanece similar ---
+**SE o Tipo de Consulta for 'Análise de Documento(s)':**
+Analise criticamente o(s) documento(s) fornecido(s) nos [TRECHOS RAG CONSULTADOS] (especialmente os marcados como 'Anexo Temp' ou 'Anexo Feedback'). Siga **ESTRITAMENTE** a seguinte estrutura:
 
-                        # Estima tokens e calcula max_tokens para esta parte
-                        prompt_tokens = estimar_tokens(prompt_atual, model_name_selected)
-                        available_completion = model_context_limit - prompt_tokens - safety_buffer
+1.  **Identificação e Sumário Executivo:**
+    * Identifique o tipo de documento principal em análise (ex: Laudo Pericial, Decisão Judicial, Relatório Técnico).
+    * Resuma brevemente o objetivo do documento e seus principais achados ou conclusões relacionados à prova digital.
 
-                        if available_completion < 50: # Reduzido o mínimo para conclusão, mas ainda precisa de espaço
-                            st.warning(f"Prompt RAG Parte {parte_num} ({papel_parte}) muito longo ({prompt_tokens} tk). Não é possível gerar esta parte.")
-                            if parte_num == 1:
-                                 st.error("Erro crítico: Prompt inicial (Introdução) excede o limite de contexto.")
-                                 raise ValueError("Prompt inicial muito longo.")
-                            break # Interrompe
+2.  **Análise da Qualidade e Conformidade:**
+    * Avalie a metodologia empregada (se descrita) em relação às boas práticas (informadas pelo RAG).
+    * **Identifique Pontos Positivos:** Destaque aspectos bem executados ou em conformidade com normas/legislação, sempre indicando o número de página e/ou ítem de estruturação do documento (cite fontes RAG de boas práticas como contraponto).
+    * **Identifique Pontos de Atenção, Erros e Vulnerabilidades:** Liste e detalhe **especificamente** quaisquer inadequações, omissões, erros técnicos, falhas procedimentais (ex: cadeia de custódia, hashing, coleta, preservação, análise, interpretação) ou vulnerabilidades encontradas, sempre indicando o número de página e/ou ítem de estruturação do documento. **Fundamente CADA ponto identificado com base nos trechos do documento analisado (citando página, se possível) e/ou comparando com as boas práticas do RAG.**
 
-                        # Ajusta max_tokens - talvez menos para intro/conclusão, mais para desenvolvimento?
-                        # Pode-se refinar isso, mas usar o da UI é um bom começo.
-                        desired_max_tokens_parte = st.session_state.desired_max_tokens
-                        # Exemplo: reduzir tokens para conclusão
-                        # if parte_num == NUM_PARTES:
-                        #    desired_max_tokens_parte = max(100, min(desired_max_tokens_parte, 500))
+3.  **Avaliação de Impacto:**
+    * Para cada falha significativa identificada, discuta o **impacto potencial** na admissibilidade, confiabilidade, integridade ou força probante da prova digital em questão.
 
-                        actual_max_tokens = max(50, min(desired_max_tokens_parte, available_completion, model_output_limit))
+4.  **Recomendações e Ações Necessárias (Segmentadas por Ator):**
+    * Com base na análise, forneça recomendações **claras, objetivas e acionáveis** para cada um dos seguintes atores (adapte conforme o contexto do documento):
+        * **Para o(s) Perito(s):** (Ex: Refazer análise X, complementar com Y, justificar método Z, revisar relatório, atentar para norma W).
+        * **Para o(s) Advogado(s):** (Ex: Impugnar prova por motivo X, requerer esclarecimentos Y, apresentar quesitos suplementares Z, explorar vulnerabilidade W em audiência, contratar assistente técnico).
+        * **Para o(s) Promotor(es):** (Ex: Requerer nova perícia, solicitar informações adicionais X, avaliar nulidade Y, ajustar estratégia acusatória com base na fragilidade Z).
+        * **Para o(s) Juiz(es):** (Ex: Determinar esclarecimentos ao perito, nomear perito judicial, sopesar valor da prova com cautela devido a X, considerar nulidade Y, intimar partes sobre ponto Z).
 
-                        status_text.info(f"Gerando {papel_parte} (~{prompt_tokens} tk, max {actual_max_tokens} tk)...")
+### RESPOSTA FINAL ###
+[Gere a resposta aqui, seguindo a estrutura definida para o tipo de consulta identificado]"""
 
-                        try:
-                            with st.spinner(f"⏳ Aguardando {model_name_selected} ({papel_parte})..."):
-                                resposta_parte_atual = criar_e_executar_llm(
-                                    prompt=prompt_atual,
-                                    model_name=model_name_selected,
-                                    temperature=st.session_state.temperature_slider,
-                                    max_tokens=actual_max_tokens
-                                )
-                            resposta_limpa = resposta_parte_atual.strip() if resposta_parte_atual else ""
+                resposta_final_formatada = "[Erro: Falha na geração da resposta]" # Valor padrão
 
-                            # Adiciona a resposta limpa à lista
-                            if resposta_limpa:
-                                respostas_geradas.append(resposta_limpa)
-                                # Atualiza a resposta anterior ACUMULADA
-                                # Para a próxima iteração, inclui um marcador claro da parte anterior
-                                resposta_anterior_acumulada += f"\n\n--- {papel_parte.upper()} (Parte {parte_num} Gerada) ---\n" + resposta_limpa
-                            else:
-                                st.info(f"{papel_parte} (Parte {parte_num}) retornou vazia. Interrompendo.")
-                                break # Interrompe se uma parte essencial retornar vazia
+                # --- SOLUÇÃO: Criação Placeholder de Resposta ---
+                # Tenta criar o placeholder de resposta, mas captura falha específica
+                try:
+                    response_placeholder = st.empty() # Linha ~2216 (agora 2270 aprox)
+                except Exception as e_placeholder:
+                    st.error(f"Falha crítica ao criar placeholder de resposta UI: {e_placeholder}")
+                    # Garante que response_placeholder seja None se a criação falhar
+                    response_placeholder = None
+                    # Re-levanta a exceção para ser pega pelo handler externo e parar a análise
+                    raise RuntimeError(f"Falha na UI (st.empty): {e_placeholder}") from e_placeholder
+                # ---------------------------------------------
 
-                        except Exception as e_llm_parte:
-                            st.warning(f"Aviso: Erro ao gerar {papel_parte} (Parte {parte_num}): {e_llm_parte}")
-                            break # Interrompe em caso de erro
+                # --- Bloco try interno para LLM e Streaming ---
+                try:
+                    # Verifica se prompt_unico foi definido
+                    if prompt_unico is None:
+                        raise ValueError("Prompt não foi gerado antes da estimativa de tokens.")
 
-                # Etapa 5: Combinar Respostas Finais e Salvar Histórico
-                progress_bar.progress(0.95, text="Finalizando e formatando resposta...");
+                    prompt_tokens = estimar_tokens(prompt_unico, model_name_selected)
+                    if progress_bar: progress_bar.progress(0.60, text=f"Prompt único preparado (~{prompt_tokens} tokens).")
 
-                if not respostas_geradas: # Se nenhuma parte foi gerada com sucesso
-                    resposta_final_formatada = "[Erro: Nenhuma resposta válida pôde ser gerada]"
-                    st.error("Falha na geração da resposta.")
-                # Verifica se TODAS as partes esperadas (NUM_PARTES) foram geradas com sucesso
-                elif len(respostas_geradas) == NUM_PARTES:
-                    # Concatena Introdução, Desenvolvimento e Conclusão com parágrafos (junção natural)
-                    # Usamos .strip() em cada parte para remover espaços extras antes/depois
-                    resposta_final_formatada = f"{respostas_geradas[0].strip()}\n\n{respostas_geradas[1].strip()}\n\n{respostas_geradas[2].strip()}"
-                    st.info(f"Resposta completa gerada com sucesso em {NUM_PARTES} partes (Intro/Dev/Concl).") # Mensagem de sucesso específica
-                else: # Caso alguma parte tenha falhado ou retornado vazia (menos que NUM_PARTES)
-                    resposta_final_formatada = "[Aviso: Falha ao gerar todas as partes estruturadas da resposta (Introdução/Desenvolvimento/Conclusão)]\n\n"
-                    # Junta as partes que FORAM geradas, para análise do erro, com separador claro
-                    resposta_final_formatada += "\n\n---\n".join([f"**Parte {i+1} Gerada:**\n{p.strip()}" for i, p in enumerate(respostas_geradas)])
-                    st.warning(f"Apenas {len(respostas_geradas)} de {NUM_PARTES} partes estruturadas foram geradas com sucesso.")
+                    available_completion = model_context_limit - prompt_tokens - safety_buffer
+                    if available_completion < 100:
+                        raise ValueError(f"Contexto insuficiente para gerar resposta. Prompt: {prompt_tokens}, Limite: {model_context_limit}, Disponível: {available_completion}")
 
-                # Adiciona nota final sobre a geração (INDEPENDENTE de ter tido sucesso em todas as partes)
-                num_partes_sucesso = len(respostas_geradas)
+                    actual_max_tokens = max(100, min(st.session_state.desired_max_tokens, available_completion, model_output_limit))
+
+                    if status_text: status_text.info(f"Gerando resposta (streaming)...")
+                    if progress_bar: progress_bar.progress(0.75, text=f"Aguardando {model_name_selected}...")
+
+                    # --- SOLUÇÃO: Uso Condicional do Placeholder no Streaming ---
+                    accumulated_response = ""
+                    response_stream = criar_e_executar_llm(
+                        prompt=prompt_unico,
+                        model_name=model_name_selected,
+                        temperature=st.session_state.temperature_slider,
+                        max_tokens=actual_max_tokens
+                    )
+
+                    for chunk in response_stream:
+                        accumulated_response += chunk
+                        if response_placeholder: # <-- VERIFICAÇÃO
+                            response_placeholder.markdown(accumulated_response + "▌")
+                        # else: pass # Faz nada ou loga se não houver placeholder
+
+                    # Atualização final
+                    if response_placeholder: # <-- VERIFICAÇÃO
+                        response_placeholder.markdown(accumulated_response)
+                    # ----------------------------------------------------------
+                    resposta_final_formatada = accumulated_response # Guarda a resposta completa
+
+                    if not resposta_final_formatada.strip() or "[Erro" in resposta_final_formatada:
+                         st.warning("Geração da resposta via streaming pode ter encontrado problemas ou retornado vazia/erro.")
+                    else:
+                         st.info("Resposta gerada com sucesso via streaming.")
+
+                except ValueError as ve: # Handler de contexto insuficiente
+                    err_msg = f"[Erro Crítico de Contexto: {ve}]"
+                    # --- SOLUÇÃO: Uso Condicional do Placeholder no Erro ---
+                    if response_placeholder: # <-- VERIFICAÇÃO
+                        response_placeholder.error(err_msg)
+                    else:
+                        st.error(err_msg) # Fallback
+                    # ------------------------------------------------------
+                    resposta_final_formatada = err_msg # Guarda a mensagem de erro
+                except Exception as e_llm_stream: # Handler de erro LLM/Stream
+                     err_msg = f"[Erro Inesperado na Geração (Streaming): {e_llm_stream}]"
+                     # --- SOLUÇÃO: Uso Condicional do Placeholder no Erro ---
+                     if response_placeholder: # <-- VERIFICAÇÃO
+                         response_placeholder.error(err_msg)
+                     else:
+                         st.error(err_msg) # Fallback
+                     # ------------------------------------------------------
+                     resposta_final_formatada = err_msg # Guarda a mensagem de erro
+                     st.code(traceback.format_exc()) # Mostra traceback para depuração
+
+                # Etapa 5: Adicionar nota final e Salvar Histórico
+                if progress_bar: progress_bar.progress(0.95, text="Finalizando e formatando resposta...")
+
+                # Adiciona nota final (rodapé)
+                if not resposta_final_formatada.endswith("\n\n---\n"):
+                    resposta_final_formatada += f"\n\n---\n"
+
                 total_chunks_usados = len(st.session_state.get('fontes_usadas', []))
                 temp_usada = st.session_state.temperature_slider
-                model_name_selected = st.session_state.model_choice_selector # Pega o nome do modelo usado
 
-                resposta_final_formatada += f"\n\n---\n" # Separador antes da nota
-
-                # Determina a nota sobre RAG baseado no contexto inicial
-                if not docs_combinados: # Caso Sem RAG original
-                     nota_final_rag = "*Nota: Resposta baseada em conhecimento geral (sem consulta RAG específica)."
-                elif total_chunks_usados > 0:
-                     nota_final_rag = f"*Consulta RAG: {total_chunks_usados} chunks utilizados."
-                else: # Caso RAG foi tentado mas nenhum chunk foi usado/retornado efetivamente na combinação final
-                     nota_final_rag = "*Nota: Consulta RAG realizada, mas nenhum chunk relevante encontrado ou utilizado para compor a resposta final."
+                if not docs_combinados: nota_final_rag = "*Nota: Resposta baseada em conhecimento geral (sem consulta RAG específica)."
+                elif total_chunks_usados > 0: nota_final_rag = f"*Consulta RAG: {total_chunks_usados} chunks utilizados."
+                else: nota_final_rag = "*Nota: Consulta RAG realizada, mas nenhum chunk relevante encontrado ou utilizado."
 
                 nota_final_modelo = f" Modelo: {model_name_selected}. Temp: {temp_usada}."
-                # Ajusta a nota sobre as partes para ser mais clara
-                if num_partes_sucesso == 1:
-                    nota_final_partes = " Resposta gerada em 1 parte."
-                elif num_partes_sucesso > 1:
-                     nota_final_partes = f" Resposta gerada em {num_partes_sucesso} partes."
-                else: # Caso 0 partes geradas com sucesso (já tratado no início, mas por segurança)
-                     nota_final_partes = " Nenhuma parte da resposta gerada com sucesso."
+                nota_final_partes = " Resposta gerada via streaming."
 
-                resposta_final_formatada += nota_final_rag + nota_final_modelo + nota_final_partes + "*"
+                # Adiciona notas apenas se não for uma mensagem de erro principal
+                if not resposta_final_formatada.startswith(("[Erro Crítico", "[Erro Inesperado")):
+                    resposta_final_formatada += nota_final_rag + nota_final_modelo + nota_final_partes + "*"
 
-                # Salva no histórico e no estado da sessão
+                # Salva no histórico e no estado da sessão (SEMPRE tenta salvar)
                 timestamp_resp = salvar_historico(st.session_state.query, resposta_final_formatada, st.session_state.get('fontes_usadas', []))
-                st.session_state['resposta'] = resposta_final_formatada
-                # Atualiza timestamp apenas se histórico foi salvo com sucesso
+                st.session_state['resposta'] = resposta_final_formatada # Atualiza o estado
                 if timestamp_resp: st.session_state['timestamp'] = timestamp_resp
-                
+
                 # ===============================================================
-                # == FIM DO BLOCO DE ANÁLISE MULTI-RESPOSTA ==
+                # == FIM DO BLOCO DE ANÁLISE ==
                 # ===============================================================
 
-                # Etapa Final: Limpeza da UI e Arquivos Temporários
-                progress_bar.progress(1.0); status_text.success("Análise concluída!")
-                analysis_placeholder.empty() # Limpa mensagens de progresso/status
+                # Etapa Final: Limpeza da UI de Análise
+                if progress_bar: progress_bar.progress(1.0)
+                if status_text: status_text.success("Análise concluída!")
+                if analysis_placeholder: analysis_placeholder.empty() # Limpa mensagens de progresso/status
 
-                # Limpa arquivos temporários salvos dos uploads
-                if temp_paths_to_clean:
-                    cleaned_count = 0
-                    for temp_file in temp_paths_to_clean:
-                        try:
-                            if os.path.exists(temp_file) and os.path.isfile(temp_file):
-                                os.remove(temp_file)
-                                cleaned_count += 1
-                        except Exception as e_clean:
-                            st.warning(f"Erro ao limpar arquivo temporário {os.path.basename(temp_file)}: {e_clean}")
-                    # st.info(f"Limpeza de {cleaned_count} arquivo(s) temporário(s) concluída.") # Opcional
-
-                st.rerun() # Recarrega a UI para exibir a resposta final e o form de feedback
-
-            except Exception as e_analysis: # Captura erro geral não tratado dentro do loop
-                st.error(f"Erro inesperado durante o processo de análise: {e_analysis}")
+            # --- BLOCO EXCEPT EXTERNO ---
+            except Exception as e_analysis:
+                # Log do erro principal
+                st.error(f"Erro inesperado durante o processo de análise geral: {e_analysis}")
                 st.code(traceback.format_exc())
-                try:
-                    # Tenta limpar a UI de progresso mesmo em caso de erro
-                    status_text.error(f"Erro durante a análise: {e_analysis}")
-                    progress_bar.progress(1.0)
-                    analysis_placeholder.empty()
-                except Exception:
-                    pass # Evita erro se placeholder já foi removido
 
-                # Tenta limpar arquivos temporários mesmo em caso de erro na análise
-                if temp_paths_to_clean:
-                    st.info("Tentando limpar arquivos temporários após erro...")
-                    for temp_file in temp_paths_to_clean:
-                        try:
-                            if os.path.exists(temp_file) and os.path.isfile(temp_file):
-                                os.remove(temp_file)
-                        except Exception as e_clean_on_error:
-                             st.warning(f"Erro ao limpar temp {os.path.basename(temp_file)} após falha: {e_clean_on_error}")
+                # --- SOLUÇÃO: Limpeza Segura da UI de Análise ---
+                # Tenta limpar a UI de análise, verificando se os elementos existem
+                if analysis_placeholder:
+                    try:
+                        # Tenta atualizar o status_text se ele existir
+                        if status_text:
+                            status_text.error(f"Erro durante a análise: {e_analysis}")
+                        # Tenta atualizar a barra de progresso se ela existir
+                        if progress_bar:
+                            progress_bar.progress(1.0)
+                        analysis_placeholder.empty() # Limpa o container de análise
+                    except Exception as e_ui_clean:
+                        st.warning(f"Erro adicional ao tentar limpar UI após falha: {e_ui_clean}")
+                # Não tentar usar response_placeholder aqui
+                # ---------------------------------------------
+
+            # --- Limpeza de Arquivos Temporários (SEMPRE tenta executar) ---
+            finally:
+                 if temp_paths_to_clean:
+                     cleaned_count = 0
+                     # st.info("Limpando arquivos temporários...") # Log opcional
+                     for temp_file in temp_paths_to_clean:
+                         try:
+                             if os.path.exists(temp_file) and os.path.isfile(temp_file):
+                                 os.remove(temp_file)
+                                 cleaned_count += 1
+                         except Exception as e_clean:
+                             st.warning(f"Erro ao limpar arquivo temporário {os.path.basename(temp_file)}: {e_clean}")
+                     # st.info(f"Limpeza de {cleaned_count} arquivo(s) temporário(s) concluída.") # Opcional
 
 
     # --- Exibição Resposta e Feedback ---
@@ -2364,7 +2393,7 @@ Siga RIGOROSAMENTE as instruções abaixo para gerar APENAS esta parte da respos
     if st.session_state.get('resposta'):
         st.markdown("---"); st.subheader("Resultado da Análise")
         # Exibe a resposta formatada (que pode conter markdown)
-        st.markdown(st.session_state.resposta, unsafe_allow_html=False) # unsafe_allow_html=False é mais seguro
+        # st.markdown(st.session_state.resposta, unsafe_allow_html=False) # unsafe_allow_html=False é mais seguro
 
         # Expander para mostrar as fontes RAG consultadas (se houver)
         if st.session_state.get('fontes_usadas'):
@@ -2404,7 +2433,8 @@ Siga RIGOROSAMENTE as instruções abaixo para gerar APENAS esta parte da respos
                 else:
                     st.markdown("- Nenhuma fonte RAG registrada ou metadados inválidos.")
         # Adiciona uma verificação para o caso de ter tido RAG mas a lista de fontes estar vazia
-        elif 'docs_combinados' in locals() and docs_combinados and not st.session_state.get('fontes_usadas'):
+        # Verifica se 'docs_combinados' foi definido neste escopo (pode não ser se erro ocorreu antes)
+        elif 'docs_combinados' in locals() and locals()['docs_combinados'] and not st.session_state.get('fontes_usadas'):
              st.warning("Consulta usou RAG, mas as fontes não foram registradas corretamente no estado da sessão.")
 
         # --- Formulário de Feedback ---
@@ -2440,7 +2470,7 @@ Siga RIGOROSAMENTE as instruções abaixo para gerar APENAS esta parte da respos
                     "Anexar arquivos para complementar/justificar (Opcional, PDF/DOCX/TXT):",
                     accept_multiple_files=True,
                     key="f_uploader",
-                    type=['pdf', 'docx', 'txt'], 
+                    type=['pdf', 'docx', 'txt'],
                     help="Anexe documentos que complementem sua análise, corrijam a resposta ou forneçam contexto adicional. O conteúdo será indexado."
                 )
                 # Botão de envio do formulário
