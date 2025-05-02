@@ -2091,7 +2091,7 @@ def main():
                         )
 
                         # k_temp: número de chunks a buscar SÓ dos anexos (geralmente menor)
-                        k_temp = 15 # Exemplo: busca até 15 chunks dos anexos
+                        k_temp = 60 # Exemplo: busca até 15 chunks dos anexos
                         db_temp.add_documents(docs_temp_chunks)
                         retrievers.append(db_temp.as_retriever(search_kwargs={"k": k_temp}))
                         # ------------------------
@@ -2108,7 +2108,7 @@ def main():
                 # Etapa 3: Buscar Documentos (RAG) usando todos os retrievers
                 if status_text: status_text.info("📚 Combinando resultados da busca RAG...")
                 # k_rag: número MÁXIMO de chunks a serem combinados e enviados ao LLM
-                k_rag = 130 # Ajuste este valor para balancear contexto e tamanho da resposta
+                k_rag = 150 # Ajuste este valor para balancear contexto e tamanho da resposta
                 if progress_bar: progress_bar.progress(0.50, text=f"Buscando e combinando até {k_rag} chunks RAG...")
 
                 # Chama a função que busca em todos os retrievers e combina/filtra
@@ -2497,7 +2497,7 @@ Analise criticamente o(s) documento(s) fornecido(s) nos [TRECHOS RAG CONSULTADOS
                              if 'df_feedback_audit' in st.session_state: del st.session_state['df_feedback_audit']
                              st.session_state['feedback_loaded'] = False
                         # Recarrega a página para mostrar a mensagem de sucesso e limpar o form
-                        st.rerun()
+                        # st.rerun()
 
 # Ponto de entrada principal da aplicação Streamlit
 if __name__ == "__main__":
