@@ -504,7 +504,7 @@ def carregar_arquivo(path, is_attachment=False):
 
 
 # Função de divisão de documentos
-def dividir_documentos(docs_com_texto_processado, chunk_size=512, chunk_overlap=100):
+def dividir_documentos(docs_com_texto_processado, chunk_size=512, chunk_overlap=150):
     """Divide documentos (já carregados e pré-processados) em chunks."""
     if not docs_com_texto_processado:
         st.info("Nenhum documento fornecido para divisão.")
@@ -881,7 +881,7 @@ def indexar_pasta_completa(caminho_textos, recursive=True):
 
     # Parâmetros de chunking (podem ser configuráveis na UI no futuro)
     # Valores maiores de chunk_size podem ser melhores para RAG, dependendo do modelo
-    chunk_config = {"chunk_size": 1024, "chunk_overlap": 150}
+    chunk_config = {"chunk_size": 1024, "chunk_overlap": 250}
     st.info(f"Configuração de Chunking: Size={chunk_config['chunk_size']}, Overlap={chunk_config['chunk_overlap']}")
 
     for i, arquivo in enumerate(arquivos_filtrados):
@@ -1549,7 +1549,7 @@ def inicializar_chromadb_exemplo(db_instance=None):
 
         # Divide os exemplos em chunks (importante para RAG funcionar bem)
         # Usar chunk_size menor pode fazer sentido para exemplos curtos
-        chunks_exemplos = dividir_documentos(docs_exemplo_info, chunk_size=256, chunk_overlap=30)
+        chunks_exemplos = dividir_documentos(docs_exemplo_info, chunk_size=256, chunk_overlap=50)
         if not chunks_exemplos:
             st.error("Nenhum chunk foi gerado para os exemplos. Conteúdo pode ser muito curto.")
             return False
@@ -2036,7 +2036,7 @@ def main():
 
                                     # Divide o conteúdo do anexo em chunks
                                     # Usar chunk_size menor para anexos pode ser útil
-                                    chunks_anexo_temp = dividir_documentos(loaded_info, chunk_size=512, chunk_overlap=50)
+                                    chunks_anexo_temp = dividir_documentos(loaded_info, chunk_size=512, chunk_overlap=100)
                                     if chunks_anexo_temp:
                                         docs_temp_chunks.extend(chunks_anexo_temp) # Acumula os chunks
                                 else:
