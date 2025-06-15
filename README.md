@@ -17,14 +17,14 @@ O sistema permite aos usuários fazer perguntas em linguagem natural, anexar doc
 * **Anexos Temporários:** Envie arquivos PDF, DOCX ou TXT para serem considerados *apenas* na consulta atual, sem indexação permanente.
 * **Indexação de Documentos:** Indexe arquivos de texto (.txt) de uma pasta específica (geralmente contendo resultados de OCR) para construir ou atualizar a base de conhecimento RAG.
 * **Gerenciamento da Base RAG:**
-    * Liste os arquivos fontes indexados.
-    * Diagnostique o estado da base de dados vetorial (ChromaDB).
-    * Repare/Recrie a base de dados (ação destrutiva!).
+    Liste os arquivos fontes indexados.
+    Diagnostique o estado da base de dados vetorial (ChromaDB).
+    Repare/Recrie a base de dados (ação destrutiva!).
 * **Sistema de Feedback:**
-    * Avalie a qualidade das respostas geradas (Ótima a Inútil).
-    * Adicione comentários e análises complementares, que podem ser indexados no RAG.
-    * Anexe arquivos para justificar o feedback, cujo conteúdo também pode ser indexado.
-    * Visualize o histórico de feedbacks salvos em um arquivo CSV.
+    Avalie a qualidade das respostas geradas (Ótima a Inútil).
+    Adicione comentários e análises complementares, que podem ser indexados no RAG.
+    Anexe arquivos para justificar o feedback, cujo conteúdo também pode ser indexado.
+    Visualize o histórico de feedbacks salvos em um arquivo CSV.
 * **Histórico de Interação:** As perguntas, respostas e fontes RAG consultadas são salvas em um arquivo de log (`historico_respostas.txt`).
 * **Inicialização com Exemplos:** Popula uma base de dados vazia com exemplos de documentos sobre forense e direito digital.
 * **Teste de API:** Verifica a conexão com a API da OpenAI.
